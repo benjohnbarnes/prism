@@ -18,6 +18,7 @@ use crate::error::line_col;
 use crate::lex::highlight::tok_class;
 use crate::lex::Token;
 use crate::resolve::{default_roots, Root};
+use crate::types::show_effects;
 use crate::{
     check, example_program, format as fmt_src, interpret, namespace_identity,
     off_platform_builtins, resume_on, suspend_line_cuts, suspend_on, with_prelude, Config,
@@ -756,6 +757,52 @@ pub fn dump(src: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Err(e) => format!("error: {e}"),
+    }
+}
+
+/// The inferred effect row of each of the snippet's own definitions.
+///
+/// Returns a JSON array of `{name, effects, row}` with the prelude elided:
+/// `effects` is the sorted list of effect names the definition may perform, and
+/// `row` is the same set rendered the way the compiler prints it (`{IO, Http}`),
+/// for display. On a front-end error, returns `{"error": "..."}`.
+///
+/// This is the capability read-out: a definition that performs a host effect
+/// carries that effect in its row, so a caller can tell — from the *type*, not
+/// from an out-of-band annotation — which host operations a definition needs
+/// before running it. That is what makes an effect surface checkable rather than
+/// asserted: a host can gate execution on the row, and a workbook can tell an
+/// effectful cell from a pure one without asking the author to mark it. The row
+/// is inferred, so it cannot silently disagree with the code.
+#[wasm_bindgen]
+#[must_use]
+pub fn def_effects(src: &str) -> String {
+    let err = |m: &str| serde_json::json!({ "error": m }).to_string();
+    let prelude: HashSet<String> = match check(&with_prelude("")) {
+        Ok(c) => c.decls.iter().map(|d| d.name.clone()).collect(),
+        Err(e) => return err(&format!("{e}")),
+    };
+    match check(&with_prelude(src)) {
+        Ok(c) => {
+            let out: Vec<serde_json::Value> = c
+                .decls
+                .iter()
+                .filter(|d| !prelude.contains(&d.name))
+                .map(|d| {
+                    let mut names: Vec<String> =
+                        d.effects.iter().map(|s| s.to_string()).collect();
+                    names.sort();
+                    names.dedup();
+                    serde_json::json!({
+                        "name": d.name,
+                        "effects": names,
+                        "row": show_effects(&d.effects),
+                    })
+                })
+                .collect();
+            Value::Array(out).to_string()
+        }
+        Err(e) => err(&format!("{e}")),
     }
 }
 
