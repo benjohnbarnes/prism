@@ -14,7 +14,7 @@ use crate::debug::trace;
 use crate::error::Error;
 use crate::eval::{
     run, run_observed_lowered_with_args, run_observed_with_args, run_ruler, run_traced,
-    run_traced_with_args, Run, StepMark, Tape,
+    run_traced_with_args, run_with_host, HostEffect, Run, StepMark, Tape,
 };
 use crate::provenance::{CapEvent, ObservationTrace};
 use crate::resolve::{default_roots, Root};
@@ -104,6 +104,51 @@ pub fn interpret_at(src: &str, base: &Path) -> Result<Run, Error> {
 pub fn interpret_on(src: &str, roots: &[Root]) -> Result<Run, Error> {
     let core = prepared_core(src, roots, &Config::from_env())?;
     run(&core).map_err(Error::RuntimeEvaluation)
+}
+
+/// The declared host-effect surface of `src`: every operation name from the
+/// program's own `effect` declarations, as interpreter [`Sym`]s.
+///
+/// This is the capability gate the effect-trap bridge uses — only these unhandled
+/// ops route to the host, so a forgotten handler for some *other* effect still
+/// faults as `unhandled effect`. Pass the **user** source (without the prepended
+/// prelude) so ambient prelude effects like `IO` are excluded. A source that does
+/// not parse yields an empty set; the real parse error surfaces from the run.
+#[must_use]
+pub fn host_ops_in(src: &str) -> std::collections::HashSet<crate::sym::Sym> {
+    crate::parse::parse(src).map_or_else(
+        |_| std::collections::HashSet::new(),
+        |p| {
+            p.program
+                .effects
+                .iter()
+                .flat_map(|e| e.ops.iter().map(|o| crate::sym::Sym::new(&o.name)))
+                .collect()
+        },
+    )
+}
+
+/// Like [`interpret`], but services unhandled ops in the declared host surface
+/// `ops` through `host` (the effect-trap bridge), streaming `print` to `out_sink`
+/// and reading `input`. An op in `ops` that reaches the top of the stack with no
+/// handler is routed to the host and the run resumes with its result; any other
+/// unhandled effect faults. Derive `ops` with [`host_ops_in`] over the user source.
+///
+/// This is the seam that later carries MCP / network / AI capabilities; the wasm
+/// `run_with_host` entry point drives it with a JS host callback.
+///
+/// # Errors
+/// Fails on front-end errors, a runtime fault, or a host error servicing an
+/// operation.
+pub fn interpret_with_host(
+    src: &str,
+    ops: std::collections::HashSet<crate::sym::Sym>,
+    out_sink: &mut dyn std::io::Write,
+    input: &mut dyn std::io::BufRead,
+    host: &mut dyn HostEffect,
+) -> Result<Run, Error> {
+    let core = prepared_core(src, &default_roots(Path::new(".")), &Config::from_env())?;
+    run_with_host(&core, out_sink, input, ops, host).map_err(Error::RuntimeEvaluation)
 }
 
 /// Like [`interpret_at`], but streams `print` to `out_sink` and reads `input`.

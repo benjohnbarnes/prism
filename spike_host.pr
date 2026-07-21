@@ -1,0 +1,10 @@
+-- Effect-trap spike (Spike 0) acceptance program.
+-- `host_call` is declared as an ordinary effect but left UNHANDLED, so at runtime
+-- it falls through `perform()` to the host-effect trap and is serviced by the JS host.
+-- Expected transcript when the host upper-cases its argument: HI
+
+effect Host
+  host_call(String) : String
+
+fn main() : Unit ! {IO, Host} =
+  println(host_call("hi"))

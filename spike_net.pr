@@ -1,0 +1,13 @@
+-- Effect-bridge 2c — a real host capability across an async boundary.
+-- `Net.fetch` is declared as an ordinary effect, left UNHANDLED, so at runtime it
+-- falls through to the host-effect trap. Under `run_with_async_host` the run
+-- SUSPENDS at the `fetch` op, the JS host performs a real `fetch()` and resolves a
+-- Promise, and the program RESUMES with the body — proving suspend/await/resume.
+
+-- (`Net` is a reserved effect name in Prism — reserved for its own network
+-- boundary capability — so this user-defined host effect is named `Http`.)
+effect Http
+  get_url(String) : String
+
+fn main() : Unit ! {IO, Http} =
+  println(get_url("https://example.com"))

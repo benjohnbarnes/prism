@@ -74,7 +74,8 @@ pub use dump::{dump, dump_at, dump_on};
 pub use execution::{
     debug_on, interpret, interpret_at, interpret_deferred_holes, interpret_io_at, interpret_io_on,
     interpret_io_on_with_args, interpret_io_on_with_args_deferred_holes, interpret_on,
-    observe_lowered_run_on, observe_run_on, observe_run_on_deferred_holes, record_on,
+    host_ops_in, interpret_with_host, observe_lowered_run_on, observe_run_on,
+    observe_run_on_deferred_holes, record_on,
     record_on_with_args, record_run_on, replay_on, replay_run_on, resume_observed_on, resume_on,
     step_ruler_on, suspend_line_cuts, suspend_on, RecordedRun, StepRuler, StepRulerRow, SuspendCut,
     SuspendResult, STEP_RULER_FORMAT,

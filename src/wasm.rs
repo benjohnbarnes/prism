@@ -88,6 +88,122 @@ pub fn run(src: &str) -> String {
     }
 }
 
+/// Run a snippet, servicing otherwise-unhandled effects through a JS host
+/// callback (the effect-trap bridge, Spike 0), and return the captured `print`
+/// transcript.
+///
+/// `host` is called as `host(op: string, args: string[]) -> string` for every
+/// effect operation that unwinds the whole stack with no in-program handler: the
+/// host services it and the program resumes with the returned string. This is the
+/// seam that later carries MCP / network / AI; the spike marshals arguments and
+/// results as strings, enough to prove the plumbing. An op the host does not
+/// recognize should throw, which faults the run like any other evaluation error.
+/// On a front-end or runtime error, returns the rendered diagnostic as text.
+#[wasm_bindgen]
+#[must_use]
+pub fn run_with_host(src: &str, host: &js_sys::Function) -> String {
+    // Bridge the Prism host-effect trap to a JS callback. Spike marshaling:
+    // every argument is rendered with `show` (a raw, unquoted string) and the
+    // result is read back as a string, so `host_call("hi") -> "HI"` round-trips.
+    struct JsHost<'a>(&'a js_sys::Function);
+    impl crate::eval::HostEffect for JsHost<'_> {
+        fn call(
+            &mut self,
+            op: crate::sym::Sym,
+            args: &[crate::eval::Rv],
+        ) -> Result<crate::eval::Rv, String> {
+            let a = js_sys::Array::new();
+            for x in args {
+                a.push(&JsValue::from_str(&x.show()));
+            }
+            let r = self
+                .0
+                .call2(&JsValue::NULL, &JsValue::from_str(op.as_str()), &a)
+                .map_err(|e| format!("host call for `{op}` failed: {e:?}"))?;
+            r.as_string()
+                .map(crate::eval::Rv::Str)
+                .ok_or_else(|| format!("host for `{op}` must return a string"))
+        }
+    }
+
+    let program = example_program(src);
+    let full = with_prelude(&program);
+    // Gate on the user program's own declared effect ops (not the prelude's), so
+    // only those unhandled ops route to the host and any other faults as usual.
+    let ops = crate::host_ops_in(&program);
+    let mut out: Vec<u8> = Vec::new();
+    let mut input = io::empty();
+    let mut h = JsHost(host);
+    match crate::interpret_with_host(&full, ops, &mut out, &mut input, &mut h) {
+        Ok(r) => r.term,
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+/// Run a snippet, servicing unhandled host ops through an **async** JS callback,
+/// and return a `Promise` of the captured `print` transcript.
+///
+/// `host(op, args)` may return a string *or a Promise of a string*: the run
+/// suspends at the op, `host` is awaited, and the program resumes with the
+/// resolved value. This is what carries a real network / MCP call across a JS
+/// `await` — the interpreter is synchronous, so the run is paused at the effect
+/// boundary and continued from its captured continuation once the host answers.
+/// Only ops in the program's own declared effect surface route to the host; any
+/// other unhandled effect faults. The Promise resolves to the transcript, or
+/// rejects with the diagnostic string on a front-end / runtime / host error.
+#[wasm_bindgen]
+pub fn run_with_async_host(src: String, host: js_sys::Function) -> js_sys::Promise {
+    // A front-end / runtime fault becomes a rejected Promise carrying the same
+    // `error: ...` text the synchronous entries return.
+    fn host_err(e: impl std::fmt::Display) -> JsValue {
+        JsValue::from_str(&format!("error: {e}"))
+    }
+    wasm_bindgen_futures::future_to_promise(async move {
+        let program = example_program(&src);
+        let ops = crate::host_ops_in(&program);
+        // `core_of` prepends the prelude itself, so pass the user program (not a
+        // prelude-composed buffer) — otherwise the prelude is declared twice.
+        let core = crate::core_of(&program).map_err(host_err)?;
+        let g = crate::eval::globals(&core);
+        let body = crate::eval::main_body(&g).map_err(host_err)?;
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = io::empty();
+        let mut m = crate::eval::Machine::new(&g, &mut out, &mut input).with_suspending_host(ops);
+        let mut step = m.host_start(&body).map_err(host_err)?;
+        loop {
+            match step {
+                crate::eval::HostStep::Done => break,
+                crate::eval::HostStep::Await(op, args) => {
+                    // Spike marshaling: args as raw (unquoted) strings via `show`.
+                    let arr = js_sys::Array::new();
+                    for a in &args {
+                        arr.push(&JsValue::from_str(&a.show()));
+                    }
+                    let ret = host
+                        .call2(&JsValue::NULL, &JsValue::from_str(op.as_str()), &arr)
+                        .map_err(|e| {
+                            JsValue::from_str(&format!("host call for `{op}` failed: {e:?}"))
+                        })?;
+                    // `Promise.resolve` passes a thenable through and wraps a plain
+                    // value, so one await path serves a sync or an async host.
+                    let settled =
+                        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&ret))
+                            .await
+                            .map_err(|e| {
+                                JsValue::from_str(&format!("host await for `{op}` failed: {e:?}"))
+                            })?;
+                    let s = settled.as_string().ok_or_else(|| {
+                        JsValue::from_str(&format!("host for `{op}` must resolve to a string"))
+                    })?;
+                    step = m.host_resume(crate::eval::Rv::Str(s)).map_err(host_err)?;
+                }
+            }
+        }
+        // The transcript accumulated in the reused machine across every suspension.
+        Ok(JsValue::from_str(&std::mem::take(&mut m.term)))
+    })
+}
+
 // The scrubber-style residents (boids, pendulum). Each example's definitions are
 // shared verbatim with its terminal corpus form; the browser appends its own
 // `main` that prints the whole trajectory, so nothing about the motion depends on

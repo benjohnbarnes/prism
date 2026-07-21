@@ -35,6 +35,8 @@ stacker = "0.1"
 thiserror = "2.0"
 toml = { version = "1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 # Unix advisory file locking (`flock`) for the on-disk store index. Only pulled
 # for unix targets; the wasm build has no filesystem and uses a no-op fallback.
@@ -80,7 +82,7 @@ harness = false
 default = ["native"]
 native = ["dep:inkwell", "dep:clap", "dep:rustyline", "dep:glob", "dep:toml"]
 mlir = ["native"]
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-bindgen-futures"]
 # Opt-in: route the native C runtime allocator through mimalloc. The mi_*
 # symbols come from the libmimalloc-sys crate (no in-tree source).
 mimalloc = ["dep:libmimalloc-sys"]

@@ -50,6 +50,60 @@ const FUNCTION_REPR: &str = "<function>";
 const CONTINUATION_REPR: &str = "<continuation>";
 const LOCAL_REF_REPR: &str = "<local-ref>";
 
+/// Services an otherwise-unhandled effect operation on behalf of the host.
+///
+/// This is the effect-trap bridge (Spike 0): when `perform` unwinds the whole
+/// frame stack without finding a handler for `op`, a `Machine` carrying a
+/// `HostEffect` routes the operation here instead of faulting, then resumes the
+/// captured continuation with the returned value. It is the seam that later
+/// carries MCP / network / AI capabilities; the spike wires up a synchronous
+/// host callback, which is enough to prove the plumbing.
+pub trait HostEffect {
+    /// Service one unhandled host-effect operation synchronously and return its
+    /// result value, or an error string that faults the run like any other
+    /// evaluation error. An op the host does not recognize should error.
+    ///
+    /// # Errors
+    /// Returns `Err` when the host cannot service `op` (unknown operation, a
+    /// marshaling failure, or a host-side fault).
+    fn call(&mut self, op: Sym, args: &[Rv]) -> Result<Rv, String>;
+}
+
+/// How the host services a trapped effect op: inline (synchronous), or by
+/// suspending the run so an async driver can await the result and resume.
+enum HostMode<'a> {
+    /// Service the op inline and resume immediately with the result (Spike 0,
+    /// and any capability the host can answer without awaiting).
+    Sync(&'a mut dyn HostEffect),
+    /// Suspend the run at the op, handing `(op, args)` and the captured
+    /// continuation out to an async driver; the driver later resumes with the
+    /// awaited result (`host_resume`). This is what carries a real network / MCP
+    /// call across a JS `await`.
+    Suspend,
+}
+
+/// The host-effect surface a run is allowed to trap to, plus how it is serviced.
+///
+/// `ops` is the declared host-effect operation set (derived from the program's
+/// own `effect` declarations): only these unhandled ops route to the host, so a
+/// forgotten handler for some *other* effect still faults as `unhandled effect`
+/// rather than silently escaping to the host. This is the capability-typing gate.
+struct HostBridge<'a> {
+    ops: std::collections::HashSet<Sym>,
+    mode: HostMode<'a>,
+}
+
+/// One step of a host-serviced run: finished, or paused awaiting the host's
+/// answer to `op(args)`. Returned by [`Machine::host_start`]/[`Machine::host_resume`]
+/// so an async driver (the wasm `run_with_async_host` entry) can await and resume.
+pub enum HostStep {
+    /// The program ran to completion; the transcript is in the machine's `term`.
+    Done,
+    /// The run suspended at an unhandled host op. The driver services `op` with
+    /// `args`, then calls `host_resume(value)` to continue.
+    Await(Sym, Vec<Rv>),
+}
+
 #[derive(Clone, Debug)]
 pub enum Rv {
     Int(i64),
@@ -148,6 +202,11 @@ enum State {
 enum Outcome {
     Done(Rv),
     Suspended { stack: Vec<Frame>, state: State },
+    // Paused at an unhandled host op (suspend-mode host). The captured
+    // continuation is stashed in `resume_cont`; `op`/`args` go to the async
+    // driver, which awaits and calls `host_resume`. Distinct from `Suspended`
+    // (step-budget/`kont`) because resumption supplies a *value*, not a snapshot.
+    HostSuspended { op: Sym, args: Vec<Rv> },
 }
 
 impl Rv {
@@ -306,6 +365,20 @@ pub struct Machine<'a> {
     // provenance stream, and an unarmed run pays nothing (the preview is built
     // lazily). See `prism exec steps` and the suspend cut report.
     ruler: Option<Vec<StepMark>>,
+    // The effect-trap bridge: when set, an effect that unwinds the whole stack
+    // with no handler and whose op is in the declared host surface is serviced by
+    // the host (inline, or by suspending for an async driver) instead of
+    // faulting. `None` is the ordinary pure/handled run and pays nothing.
+    host: Option<HostBridge<'a>>,
+    // Set by `perform` when a suspend-mode host op traps: the op and its args to
+    // hand to the async driver. `run_loop` turns this into `Outcome::HostSuspended`
+    // and clears it. Separate from `host` so the borrow of the bridge is released
+    // before the suspension is recorded.
+    pending_host: Option<(Sym, Vec<Rv>)>,
+    // The captured tail-continuation of a suspended host op, restored by
+    // `host_resume` (with the awaited value) to continue exactly where the op was
+    // performed. Mirrors the frames an `Rv::Resume` would carry.
+    resume_cont: Option<Vec<Frame>>,
 }
 
 /// One observation on the machine-step clock: the step at which it fired, its
@@ -413,7 +486,39 @@ impl<'a> Machine<'a> {
             step_budget: None,
             steps: 0,
             ruler: None,
+            host: None,
+            pending_host: None,
+            resume_cont: None,
         }
+    }
+
+    /// Attach a synchronous [`HostEffect`] gated on the declared host-effect
+    /// surface `ops`: an unhandled op in `ops` is serviced inline by `host` and
+    /// the continuation resumed with the result (the effect-trap bridge), while
+    /// an unhandled op outside `ops` still faults. Builder-style so the many
+    /// existing constructors keep their `None` default and only host runners opt in.
+    #[must_use]
+    pub fn with_host(
+        mut self,
+        ops: std::collections::HashSet<Sym>,
+        host: &'a mut dyn HostEffect,
+    ) -> Self {
+        self.host = Some(HostBridge {
+            ops,
+            mode: HostMode::Sync(host),
+        });
+        self
+    }
+
+    /// Like [`with_host`], but a trapped op *suspends* the run (for an async
+    /// driver to await and `host_resume`) rather than being serviced inline.
+    #[must_use]
+    pub fn with_suspending_host(mut self, ops: std::collections::HashSet<Sym>) -> Self {
+        self.host = Some(HostBridge {
+            ops,
+            mode: HostMode::Suspend,
+        });
+        self
     }
 
     /// Arm the step ruler: from here on, every observation is marked with the
@@ -654,9 +759,55 @@ impl<'a> Machine<'a> {
     fn exec(&mut self, root: Cmp, env: Env) -> Result<Rv, String> {
         match self.run_loop(Vec::new(), State::Eval(root, env))? {
             Outcome::Done(v) => Ok(v),
-            // A bare `exec` never sets a step budget, so it cannot suspend; the
-            // suspend/resume drivers use `run_loop` directly.
-            Outcome::Suspended { .. } => Err("evaluation suspended without a resume driver".into()),
+            // A bare `exec` never sets a step budget or a suspend-mode host, so it
+            // cannot pause; the suspend/resume and async-host drivers use
+            // `run_loop`/`host_start` directly.
+            Outcome::Suspended { .. } | Outcome::HostSuspended { .. } => {
+                Err("evaluation suspended without a resume driver".into())
+            }
+        }
+    }
+
+    /// Start a host-serviced run, driving to completion or the first suspend-mode
+    /// host op. Pair with [`Machine::host_resume`]; the machine must have been
+    /// built with [`Machine::with_suspending_host`]. The transcript accumulates in
+    /// `self.term` across suspensions (the same machine is reused), so a driver
+    /// reads it once the run reports [`HostStep::Done`].
+    ///
+    /// # Errors
+    /// Fails on any evaluation fault, or if the run pauses for a reason other than
+    /// a host op (a step budget), which a host driver does not arm.
+    pub fn host_start(&mut self, root: &Comp) -> Result<HostStep, String> {
+        self.drive_host(lower(root), Env::default())
+    }
+
+    /// Resume a run suspended at a host op ([`HostStep::Await`]) with the value
+    /// the host produced, driving to completion or the next host op.
+    ///
+    /// # Errors
+    /// Fails when there is no suspended continuation to resume, on any evaluation
+    /// fault, or on an unexpected non-host pause.
+    pub fn host_resume(&mut self, value: Rv) -> Result<HostStep, String> {
+        let cont = self
+            .resume_cont
+            .take()
+            .ok_or("host_resume: no suspended host continuation")?;
+        match self.run_loop(cont, State::Ret(value))? {
+            Outcome::Done(_) => Ok(HostStep::Done),
+            Outcome::HostSuspended { op, args } => Ok(HostStep::Await(op, args)),
+            Outcome::Suspended { .. } => {
+                Err("host run paused on a step budget, not a host op".into())
+            }
+        }
+    }
+
+    fn drive_host(&mut self, root: Cmp, env: Env) -> Result<HostStep, String> {
+        match self.run_loop(Vec::new(), State::Eval(root, env))? {
+            Outcome::Done(_) => Ok(HostStep::Done),
+            Outcome::HostSuspended { op, args } => Ok(HostStep::Await(op, args)),
+            Outcome::Suspended { .. } => {
+                Err("host run paused on a step budget, not a host op".into())
+            }
         }
     }
 
@@ -666,6 +817,13 @@ impl<'a> Machine<'a> {
     // live state handed back for snapshotting.
     fn run_loop(&mut self, mut stack: Vec<Frame>, mut state: State) -> Result<Outcome, String> {
         loop {
+            // A suspend-mode host op paused the run (set by `perform`): yield it
+            // to the async driver. The captured continuation is already in
+            // `resume_cont`; `host_resume` restores it with the awaited value.
+            // The sentinel `state`/`stack` from the trapping step are discarded.
+            if let Some((op, args)) = self.pending_host.take() {
+                return Ok(Outcome::HostSuspended { op, args });
+            }
             // `exit` short-circuits the whole program: stop unwinding and hand
             // the last value back so the host can act on `self.exit`. A replay
             // budget halt unwinds the same way (replay-to-N stops here).
@@ -1087,7 +1245,43 @@ impl<'a> Machine<'a> {
                 other => captured.push(other),
             }
         }
-        Err(format!("unhandled effect `{op}`"))
+        // Effect-trap bridge: the stack unwound with no handler for `op`. If a
+        // host is attached and `op` is in its declared surface, service it;
+        // otherwise fault as before. `captured` holds the unwound frames in pop
+        // order (innermost first); reversing restores the caller's order — the
+        // same discipline as the handler's `resume` (`Rv::Resume`) path — so the
+        // resumed run continues exactly where the effect was performed.
+        //
+        // The bridge borrow is resolved to a plain outcome first so that the
+        // suspend branch can record `pending_host`/`resume_cont` without holding
+        // a borrow of `self.host`.
+        enum Trap {
+            Value(Rv),
+            Suspend,
+        }
+        let trap = match self.host.as_mut() {
+            Some(bridge) if bridge.ops.contains(&op) => match &mut bridge.mode {
+                HostMode::Sync(host) => Some(Trap::Value(host.call(op, &args)?)),
+                HostMode::Suspend => Some(Trap::Suspend),
+            },
+            _ => None,
+        };
+        match trap {
+            Some(Trap::Value(v)) => {
+                captured.reverse();
+                stack.extend(captured);
+                Ok(State::Ret(v))
+            }
+            Some(Trap::Suspend) => {
+                captured.reverse();
+                self.resume_cont = Some(captured);
+                self.pending_host = Some((op, args));
+                // A sentinel return; `run_loop` sees `pending_host` set on the
+                // next turn and yields `Outcome::HostSuspended` before this is used.
+                Ok(State::Ret(Rv::Unit))
+            }
+            None => Err(format!("unhandled effect `{op}`")),
+        }
     }
 }
 
@@ -1218,6 +1412,17 @@ pub fn globals(core: &Core) -> BTreeMap<Sym, CoreFn> {
     core.fns.iter().map(|f| (f.name, f.clone())).collect()
 }
 
+/// The body of `main` in a global table, for a host driver ([`Machine::host_start`])
+/// to start from without knowing the entry-point symbol or lowering details.
+///
+/// # Errors
+/// Fails when the table has no `main`.
+pub fn main_body(g: &BTreeMap<Sym, CoreFn>) -> Result<Comp, String> {
+    g.get(&Sym::new(ENTRY_POINT))
+        .map(|f| f.body.clone())
+        .ok_or_else(|| "no main function".into())
+}
+
 /// Run `core` capturing all `print` output into the returned [`Run`]'s `term`
 /// (the differential oracle and wasm path), reading input from an empty source.
 /// Nothing reaches real stdio.
@@ -1260,6 +1465,33 @@ pub fn run_io_with_args(
     let g = globals(core);
     let main = g.get(&Sym::new(ENTRY_POINT)).ok_or("no main function")?;
     let mut m = Machine::new_with_args(&g, out_sink, input, args);
+    let value = m.comp(&Env::default(), &main.body)?;
+    Ok(Run {
+        value,
+        out: m.out,
+        term: m.term,
+        exit: m.exit,
+    })
+}
+
+/// Like [`run_io`], but services unhandled ops in the declared host surface
+/// `ops` through `host` (the effect-trap bridge). An effect in `ops` that reaches
+/// the top of the stack with no handler is routed to the host and the run resumes
+/// with its result; any other unhandled effect faults with `unhandled effect`.
+///
+/// # Errors
+/// Fails when `main` is missing, evaluation faults, or the host errors servicing
+/// an operation.
+pub fn run_with_host(
+    core: &Core,
+    out_sink: &mut dyn io::Write,
+    input: &mut dyn io::BufRead,
+    ops: std::collections::HashSet<Sym>,
+    host: &mut dyn HostEffect,
+) -> Result<Run, String> {
+    let g = globals(core);
+    let main = g.get(&Sym::new(ENTRY_POINT)).ok_or("no main function")?;
+    let mut m = Machine::new_with_args(&g, out_sink, input, Vec::new()).with_host(ops, host);
     let value = m.comp(&Env::default(), &main.body)?;
     Ok(Run {
         value,
@@ -1580,6 +1812,11 @@ fn run_suspending_inner(
                 marks,
             ))
         }
+        // This driver arms a step budget, never a suspend-mode host, so a host
+        // suspension cannot arise here.
+        Outcome::HostSuspended { .. } => {
+            Err("suspend run trapped an unexpected host effect".into())
+        }
     }
 }
 
@@ -1652,8 +1889,11 @@ pub fn resume_kont(
             term: m.term,
             exit: m.exit,
         }),
-        // No step budget is set on a resume, so the loop cannot pause again.
-        Outcome::Suspended { .. } => Err("resumed continuation paused unexpectedly".into()),
+        // No step budget or suspend-mode host is set on a resume, so the loop
+        // cannot pause again.
+        Outcome::Suspended { .. } | Outcome::HostSuspended { .. } => {
+            Err("resumed continuation paused unexpectedly".into())
+        }
     }
 }
 
@@ -1689,7 +1929,7 @@ pub fn resume_kont_observed(
             }
             None
         }
-        Ok(Outcome::Suspended { .. }) => {
+        Ok(Outcome::Suspended { .. } | Outcome::HostSuspended { .. }) => {
             let fault = "resumed continuation paused unexpectedly".to_string();
             if let Some(observations) = &mut m.observations {
                 observations.push(Observation::Fault(fault.clone()));

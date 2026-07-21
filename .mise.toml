@@ -1,0 +1,26 @@
+# Dev-environment pin for the Prism effect-trap spike (Spike 0) and its wasm build.
+# mise owns the whole toolchain here: the Rust toolchain, the wasm target, and the
+# wasm-bindgen CLI, so `mise install` from a bare checkout is the one setup step.
+#
+# The Rust version matches the repo's rust-toolchain.toml (1.96.0); pinning it here
+# too means mise installs exactly that toolchain (with the wasm target added by the
+# build task below). No LLVM / no C toolchain is required for the wasm build:
+# build.rs skips the vendored C runtime on wasm32 and the interpreter path is
+# LLVM-free.
+
+[tools]
+rust = { version = "1.96.0", components = "rustfmt,clippy" }
+"cargo:wasm-bindgen-cli" = "0.2.126"   # MUST match the wasm-bindgen crate (Cargo.lock)
+
+[tasks.wasm]
+description = "Build the Prism wasm (interpreter front-end; no LLVM)"
+run = [
+  "rustup target add wasm32-unknown-unknown",
+  "cargo rustc --lib --crate-type cdylib --target wasm32-unknown-unknown --release --no-default-features --features wasm",
+  "wasm-bindgen target/wasm32-unknown-unknown/release/prism.wasm --target web --out-dir web/pkg --out-name prism",
+]
+
+[tasks.spike]
+description = "Build wasm and run the effect-trap acceptance test"
+depends = ["wasm"]
+run = "node spike_host.test.mjs"
