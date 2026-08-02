@@ -806,6 +806,41 @@ pub fn def_effects(src: &str) -> String {
     }
 }
 
+/// The structural schema of a datatype the snippet defines — its constructors and
+/// field types — as JSON, for the host to validate its own documents against and to
+/// derive default renderings from (see `docs/SELF-DESCRIPTION-DESIGN.md`). Same shape
+/// of change as `def_effects`: additive, reading structure the compiler already has.
+///
+/// `type_schema(src, "Catalog")` returns that type's schema
+/// (`{params, newtype, constructors:[{name, fields|args}]}`); an empty `name` returns
+/// every *user* type (prelude elided), keyed by name. `{"error": "..."}` on a
+/// front-end error or an unknown type name.
+#[wasm_bindgen]
+#[must_use]
+pub fn type_schema(src: &str, name: &str) -> String {
+    let err = |m: &str| serde_json::json!({ "error": m }).to_string();
+    // Type names the prelude alone contributes, so an empty-`name` query returns only
+    // the user's own types (the same elision `def_effects`/`hash_defs` do).
+    let prelude: HashSet<String> = match crate::type_schemas_of(&with_prelude("")) {
+        Ok(serde_json::Value::Object(m)) => m.keys().cloned().collect(),
+        _ => HashSet::new(),
+    };
+    match crate::type_schemas_of(&with_prelude(src)) {
+        Ok(serde_json::Value::Object(m)) => {
+            if name.is_empty() {
+                let user: serde_json::Map<String, serde_json::Value> =
+                    m.into_iter().filter(|(k, _)| !prelude.contains(k)).collect();
+                serde_json::Value::Object(user).to_string()
+            } else {
+                m.get(name)
+                    .map_or_else(|| err(&format!("no such type: {name}")), ToString::to_string)
+            }
+        }
+        Ok(_) => err("unexpected schema shape"),
+        Err(e) => err(&format!("{e}")),
+    }
+}
+
 /// The snippet's own definitions as a content-addressed Merkle DAG.
 ///
 /// Returns a JSON array of `{name, hash, deps}` with the prelude elided: `hash`

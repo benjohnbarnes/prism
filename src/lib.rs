@@ -90,6 +90,7 @@ pub use driver::{
     observe_run_on_deferred_holes, off_platform_builtins, public_surface, query_on, rc_balanced,
     record_on, record_on_with_args, record_run_on, replay_on, replay_run_on, report, report_at,
     report_on, resume_observed_on, resume_on, shape_digests_of, source_diff_on, source_modules,
+    type_schemas_of,
     stdlib_hash, step_ruler_on, store_def_inputs, suspend_line_cuts, suspend_on,
     verify_semantic_patch_behavior, with_custom_prelude, with_prelude, BackendOpt, BehaviorCase,
     BehaviorCaseResult, BehaviorCorpus, BehaviorDivergence, BehaviorReceipt, CheckedModule,

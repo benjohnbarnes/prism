@@ -17,6 +17,7 @@ use crate::eval::{run, Rv};
 use crate::lex::lex;
 use crate::parse::{parse, ParseResult};
 use crate::resolve::{default_roots, resolve_modules_in, Root};
+use crate::syntax::ast::{DataDecl, Ty};
 use crate::syntax::desugar::desugar;
 use crate::types::{check as typecheck, Checked};
 
@@ -191,4 +192,75 @@ pub fn report_on(src: &str, roots: &[Root], cfg: &Config) -> String {
 pub fn shape_digests_of(src: &str) -> Result<BTreeMap<String, Digest>, Error> {
     let (program, _, _) = frontend(src, &default_roots(Path::new(".")), &Config::from_env())?;
     Ok(crate::core::shape_digests(&program.types, &program.effects))
+}
+
+/// The structural schema of every datatype `src` defines, keyed by type name:
+/// its type parameters, whether it is a newtype, and each constructor's fields
+/// (named, for records) or positional argument types. Types nest by name
+/// (`List(CatalogEntry)`, `Option(DefHash)`).
+///
+/// This is the enabler for host-side self-description (see
+/// `docs/SELF-DESCRIPTION-DESIGN.md`): the host validates its own Loro documents
+/// against the declared shape and derives default renderings from it. Companion to
+/// `shape_digests_of`, which hashes the same shapes; this exposes them structurally.
+///
+/// # Errors
+/// Fails if `src` does not parse, resolve, or type-check.
+pub fn type_schemas_of(src: &str) -> Result<serde_json::Value, Error> {
+    let (program, _, _) = frontend(src, &default_roots(Path::new(".")), &Config::from_env())?;
+    let mut out = serde_json::Map::new();
+    for d in &program.types {
+        out.insert(d.name.clone(), data_schema_json(d));
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// One datatype's schema as JSON: `{ params, newtype, constructors: [...] }`.
+fn data_schema_json(d: &DataDecl) -> serde_json::Value {
+    let ctors: Vec<serde_json::Value> = d
+        .ctors
+        .iter()
+        .map(|c| match &c.fields {
+            // Record constructor: named fields (`X { a : T }`).
+            Some(fields) => serde_json::json!({
+                "name": c.name,
+                "fields": fields
+                    .iter()
+                    .map(|(n, t)| serde_json::json!({ "name": n, "type": ty_str(t) }))
+                    .collect::<Vec<_>>(),
+            }),
+            // Positional constructor (`X(T, U)`).
+            None => serde_json::json!({
+                "name": c.name,
+                "args": c.args.iter().map(ty_str).collect::<Vec<_>>(),
+            }),
+        })
+        .collect();
+    serde_json::json!({ "params": d.params, "newtype": d.newtype, "constructors": ctors })
+}
+
+/// Render a surface type as the string a reader would write (`List(CatalogEntry)`,
+/// `Option(DefHash)`, `String`). Enough for the schema consumers (validation and the
+/// default renderer); rarer forms fall back to their debug spelling.
+fn ty_str(t: &Ty) -> String {
+    match t {
+        Ty::Int => "Int".to_string(),
+        Ty::I64 => "I64".to_string(),
+        Ty::U64 => "U64".to_string(),
+        Ty::Bool => "Bool".to_string(),
+        Ty::Unit => "Unit".to_string(),
+        Ty::Float => "Float".to_string(),
+        Ty::Char => "Char".to_string(),
+        Ty::Str => "String".to_string(),
+        Ty::Var(s) => s.clone(),
+        Ty::Con(name, args) | Ty::App(name, args) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}({})", args.iter().map(ty_str).collect::<Vec<_>>().join(", "))
+            }
+        }
+        Ty::Tuple(ts) => format!("({})", ts.iter().map(ty_str).collect::<Vec<_>>().join(", ")),
+        other => format!("{other:?}"),
+    }
 }

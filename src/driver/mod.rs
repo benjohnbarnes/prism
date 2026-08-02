@@ -96,7 +96,7 @@ pub use module_graph::{
 };
 pub use modules::{check_modules_on, CheckedModule, ModuleCheckReport};
 pub use query::query_on;
-pub use report::{report, report_at, report_on, shape_digests_of};
+pub use report::{report, report_at, report_on, shape_digests_of, type_schemas_of};
 pub use semantic_patch::{
     apply_semantic_patch, fetch_semantic_patch, impact_semantic_patch,
     verify_semantic_patch_behavior, BehaviorCase, BehaviorCaseResult, BehaviorCorpus,
