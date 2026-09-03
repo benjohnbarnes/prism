@@ -45,9 +45,9 @@ fn main() {
                     println!("  {} : {}{}", d.name, d.ty.show(), pure);
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 println!("[check] FAILED");
-                print!("{}", prism::report(&full));
+                println!("{e}");
             }
         }
 
