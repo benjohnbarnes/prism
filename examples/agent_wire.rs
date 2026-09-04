@@ -129,4 +129,27 @@ fn main() =
   println(render(wire_encode_stable(r)))
 "#,
     );
+
+    // G. Bridge: a Stable/Serialize value decoded from wire, then converted to the
+    //    dynamic Json tree and encoded — so the host can hold compact wire and
+    //    materialize JSON on demand (and vice versa via FromJson).
+    run_case(
+        "wire-to-json-bridge",
+        r#"import Wire (..)
+import Json (..)
+type Point = Point { x : Int, y : Int } deriving (Show, Serialize, Stable, ToJson, FromJson)
+fn decode_point(bs : Bytes) : Point = wire_decode_stable(bs)
+fn decode_point_from_json(j : Json) : Point = from_json(j)
+fn wire_to_json(bs : Bytes) : String = encode(to_json(decode_point(bs)))
+fn json_to_wire(s : String) : Bytes =
+  match decode(s) of
+    Ok(j) => wire_encode_stable(decode_point_from_json(j))
+    Err(_e) => fail()
+fn main() =
+  let p = Point { x = 1, y = 2 }
+  println("wire -> json: {wire_to_json(wire_encode_stable(p))}")
+  let round = decode_point(json_to_wire(wire_to_json(wire_encode_stable(p))))
+  println("json -> wire -> value: {show(round)}")
+"#,
+    );
 }
