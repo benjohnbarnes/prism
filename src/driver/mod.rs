@@ -86,9 +86,10 @@ pub use diff::{
 pub(crate) use diff::{diff_on_roots, render_source_diff, source_diff_on_roots};
 pub use dump::{dump, dump_at, dump_on};
 pub use execution::{
-    debug_on, durable_run_on, interpret, interpret_at, interpret_deferred_holes, interpret_io_at,
-    interpret_io_on, interpret_io_on_with_args, interpret_io_on_with_args_deferred_holes,
-    interpret_on, observe_lowered_run_on, observe_run_on, observe_run_on_deferred_holes, record_on,
+    debug_on, durable_run_on, host_ops_in, interpret, interpret_at, interpret_deferred_holes,
+    interpret_io_at, interpret_io_on, interpret_io_on_with_args,
+    interpret_io_on_with_args_deferred_holes, interpret_on, interpret_with_host,
+    interpret_with_host_on, observe_lowered_run_on, observe_run_on, observe_run_on_deferred_holes, record_on,
     record_on_with_args, record_run_on, replay_on, replay_run_on, resume_observed_on, resume_on,
     step_ruler_on, suspend_at_cut_on, suspend_line_cuts, suspend_on, CutReport, CutTarget,
     DurableRun, RecordedRun, StepRuler, StepRulerRow, SuspendAtCut, SuspendCut, SuspendResult,
@@ -114,7 +115,7 @@ pub use module_graph::{
 };
 pub use modules::{check_modules_on, CheckedModule, ModuleCheckReport};
 pub use query::{query_on, type_tokens};
-pub use report::{report, report_at, report_on, shape_digests_of};
+pub use report::{docs_of, report, report_at, report_on, shape_digests_of, type_schemas_of, type_schemas_of_in};
 pub use semantic_patch::{
     apply_semantic_patch, fetch_semantic_patch, impact_semantic_patch,
     verify_semantic_patch_behavior, BehaviorCase, BehaviorCaseResult, BehaviorCorpus,

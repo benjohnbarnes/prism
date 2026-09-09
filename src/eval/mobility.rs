@@ -172,6 +172,8 @@ pub(super) fn land(m: &mut Machine<'_>, envelope: &Rv) -> Result<Rv, String> {
         Outcome::Done(_) => Ok(ok(Rv::Unit)),
         // No step budget is set on this machine's landing, so the loop cannot
         // pause inside one.
-        Outcome::Suspended { .. } => Err("landed continuation paused unexpectedly".into()),
+        Outcome::Suspended { .. } | Outcome::HostSuspended { .. } => {
+            Err("landed continuation paused unexpectedly".into())
+        }
     }
 }
