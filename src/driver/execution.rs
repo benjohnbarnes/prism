@@ -19,8 +19,8 @@ use crate::eval::kont::{decode_kont, encode_kont};
 use crate::eval::{
     globals, resume_kont, resume_kont_observed, run, run_io_with_args,
     run_observed_lowered_with_args, run_observed_with_args, run_ruler, run_suspending_at_cut,
-    run_suspending_in, run_suspending_ruled, run_traced, run_traced_with_args, Checkpoint,
-    CutPredicate, Run, StepMark, Tape,
+    run_suspending_in, run_suspending_ruled, run_traced, run_traced_with_args, run_with_host,
+    Checkpoint, CutPredicate, HostEffect, Run, StepMark, Tape,
 };
 use crate::lineage::provenance::{cap_op_label, cap_op_labels, CapEvent, ObservationTrace};
 use crate::resolve::{default_roots, Root};
@@ -978,4 +978,65 @@ pub(super) fn interp_transcript(src: &str, roots: &[Root], cfg: &Config) -> Resu
     let mut input = Cursor::new(Vec::new());
     interpret_io_on(src, roots, &mut out, &mut input, cfg)?;
     Ok(out)
+}
+
+/// The declared host-effect surface of `src`: every operation name from the
+/// program's own `effect` declarations, as interpreter [`Sym`]s.
+///
+/// This is the capability gate the effect-trap bridge uses — only these unhandled
+/// ops route to the host, so a forgotten handler for some *other* effect still
+/// faults as `unhandled effect`. Pass the **user** source (without the prepended
+/// prelude) so ambient prelude effects like `IO` are excluded. A source that does
+/// not parse yields an empty set; the real parse error surfaces from the run.
+#[must_use]
+pub fn host_ops_in(src: &str) -> std::collections::HashSet<Sym> {
+    crate::parse::parse(src).map_or_else(
+        |_| std::collections::HashSet::new(),
+        |p| {
+            p.program
+                .effects
+                .iter()
+                .flat_map(|e| e.ops.iter().map(|o| Sym::new(&o.name)))
+                .collect()
+        },
+    )
+}
+
+/// Like [`interpret`], but services unhandled ops in the declared host surface
+/// `ops` through `host` (the effect-trap bridge), streaming `print` to `out_sink`
+/// and reading `input`. An op in `ops` that reaches the top of the stack with no
+/// handler is routed to the host and the run resumes with its result; any other
+/// unhandled effect faults. Derive `ops` with [`host_ops_in`] over the user source.
+///
+/// # Errors
+/// Fails on front-end errors, a runtime fault, or a host error servicing an
+/// operation.
+pub fn interpret_with_host(
+    src: &str,
+    ops: std::collections::HashSet<Sym>,
+    out_sink: &mut dyn Write,
+    input: &mut dyn BufRead,
+    host: &mut dyn HostEffect,
+) -> Result<Run, Error> {
+    let core = prepared_core(src, &default_roots(Path::new(".")), &Config::from_env())?;
+    run_with_host(&core, out_sink, input, ops, host).map_err(Error::RuntimeEvaluation)
+}
+
+/// [`interpret_with_host`] with explicit resolution roots and configuration (the
+/// variant a host uses when it supplies its own module roots and store path).
+///
+/// # Errors
+/// Fails on front-end errors, a runtime fault, or a host error servicing an
+/// operation.
+pub fn interpret_with_host_on(
+    src: &str,
+    roots: &[Root],
+    out_sink: &mut dyn Write,
+    input: &mut dyn BufRead,
+    ops: std::collections::HashSet<Sym>,
+    host: &mut dyn HostEffect,
+    cfg: &Config,
+) -> Result<Run, Error> {
+    let core = prepared_core(src, roots, cfg)?;
+    run_with_host(&core, out_sink, input, ops, host).map_err(Error::RuntimeEvaluation)
 }

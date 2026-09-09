@@ -36,7 +36,8 @@ use super::verify::{fip_check, replayable_check};
 use super::{finish_lowered, hash_meta, lower_opt};
 // The rendered `fbip (rc)` section is not native-gated, so its borrow masks are
 // needed on every target.
-use super::{frontend, rc_borrow_sigs, Config};
+use super::{frontend, rc_borrow_sigs, with_prelude, Config};
+use crate::syntax::ast::{DataDecl, Ty};
 
 pub(super) fn types_section(checked: &Checked) -> String {
     let mut s = String::new();
@@ -195,4 +196,166 @@ pub fn report_on(src: &str, roots: &[Root], cfg: &Config) -> String {
 pub fn shape_digests_of(src: &str) -> Result<BTreeMap<String, Digest>, Error> {
     let (program, _, _) = frontend(src, &default_roots(Path::new(".")), &Config::from_env())?;
     Ok(crate::core::shape_digests(&program.types, &program.effects))
+}
+
+/// Extract each top-level declaration's doc comment (`-- |` Haddock runs) from
+/// `src`, keyed by the declaration name. A `-- |` run continues over following
+/// plain `--` lines and attaches to the next top-level declaration; a blank line
+/// ends the run. This is the host's description channel: the LLM reads a
+/// function's prose without a codegen round-trip.
+#[must_use]
+pub fn docs_of(src: &str) -> BTreeMap<String, String> {
+    let mut docs = BTreeMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if let Some(text) = trimmed.strip_prefix("-- |") {
+            pending.push(text.trim_start().to_string());
+            continue;
+        }
+        if trimmed.starts_with("--") {
+            // A plain `--` line continues the doc run in progress (Haddock style).
+            if !pending.is_empty() {
+                let text = trimmed.strip_prefix("--").unwrap_or("").trim_start();
+                pending.push(text.to_string());
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            pending.clear();
+            continue;
+        }
+        if let Some(name) = decl_name(trimmed) {
+            if !pending.is_empty() {
+                docs.entry(name.to_string())
+                    .or_insert_with(|| pending.join("\n"));
+                pending.clear();
+            }
+        }
+    }
+    docs
+}
+
+/// The declared name at the head of a top-level declaration line, if any.
+fn decl_name(line: &str) -> Option<&str> {
+    let body = line.strip_prefix("pub ").unwrap_or(line);
+    for kw in [
+        "fn ", "type ", "effect ", "class ", "instance ", "op ", "ctr ", "law ",
+    ] {
+        if let Some(rest) = body.strip_prefix(kw) {
+            let name = rest
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// The structural schema of every datatype `src` defines, keyed by type name: its
+/// type parameters, whether it is a newtype, and each constructor's fields (named,
+/// for records) or positional argument types. Types nest by name
+/// (`List(CatalogEntry)`, `Option(DefHash)`).
+///
+/// This is the host-side self-description primitive: the host validates its own
+/// documents against the declared shape and derives default renderings from it.
+/// Companion to [`shape_digests_of`], which hashes the same shapes; this exposes
+/// them structurally (for the LLM's benefit and for schema validation).
+///
+/// # Errors
+/// Fails if `src` does not parse, resolve, or type-check.
+pub fn type_schemas_of(src: &str) -> Result<serde_json::Value, Error> {
+    type_schemas_of_in(src, &default_roots(Path::new(".")), &Config::from_env())
+}
+
+/// [`type_schemas_of`] with explicit resolution roots and configuration (the
+/// variant a host uses when a module imports other host modules).
+///
+/// The prelude is prepended so `deriving (Show, Eq, …)` clauses resolve, and the
+/// prelude's own types are elided from the result (only the user's types are
+/// returned).
+///
+/// # Errors
+/// Fails if `src` does not parse, resolve, or type-check.
+pub fn type_schemas_of_in(
+    src: &str,
+    roots: &[Root],
+    cfg: &Config,
+) -> Result<serde_json::Value, Error> {
+    let prelude: std::collections::BTreeSet<String> = match schema_map("", roots, cfg) {
+        Ok(m) => m.keys().cloned().collect(),
+        Err(_) => std::collections::BTreeSet::new(),
+    };
+    let map = schema_map(src, roots, cfg)?;
+    let user: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .filter(|(k, _)| !prelude.contains(k))
+        .collect();
+    Ok(serde_json::Value::Object(user))
+}
+
+fn schema_map(
+    src: &str,
+    roots: &[Root],
+    cfg: &Config,
+) -> Result<serde_json::Map<String, serde_json::Value>, Error> {
+    let (program, _, _) = frontend(&with_prelude(src), roots, cfg)?;
+    let mut out = serde_json::Map::new();
+    for d in &program.types {
+        out.insert(d.name.clone(), data_schema_json(d));
+    }
+    Ok(out)
+}
+
+/// One datatype's schema as JSON: `{ params, newtype, constructors: [...] }`.
+fn data_schema_json(d: &DataDecl) -> serde_json::Value {
+    let ctors: Vec<serde_json::Value> = d
+        .ctors
+        .iter()
+        .map(|c| match &c.fields {
+            // Record constructor: named fields (`X { a : T }`).
+            Some(fields) => serde_json::json!({
+                "name": c.name,
+                "fields": fields
+                    .iter()
+                    .map(|(n, t)| serde_json::json!({ "name": n, "type": ty_str(t) }))
+                    .collect::<Vec<_>>(),
+            }),
+            // Positional constructor (`X(T, U)`).
+            None => serde_json::json!({
+                "name": c.name,
+                "args": c.args.iter().map(ty_str).collect::<Vec<_>>(),
+            }),
+        })
+        .collect();
+    serde_json::json!({ "params": d.params, "newtype": d.newtype, "constructors": ctors })
+}
+
+/// Render a surface type as the string a reader would write (`List(CatalogEntry)`,
+/// `Option(DefHash)`, `String`). Enough for the schema consumers (validation and the
+/// default renderer); rarer forms fall back to their debug spelling.
+fn ty_str(t: &Ty) -> String {
+    match t {
+        Ty::Int => "Int".to_string(),
+        Ty::I64 => "I64".to_string(),
+        Ty::U64 => "U64".to_string(),
+        Ty::Bool => "Bool".to_string(),
+        Ty::Unit => "Unit".to_string(),
+        Ty::Float => "Float".to_string(),
+        Ty::Char => "Char".to_string(),
+        Ty::Str => "String".to_string(),
+        Ty::Var(s) => s.clone(),
+        Ty::Con(name, args) | Ty::App(name, args) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}({})", args.iter().map(ty_str).collect::<Vec<_>>().join(", "))
+            }
+        }
+        Ty::Tuple(ts) => format!("({})", ts.iter().map(ty_str).collect::<Vec<_>>().join(", ")),
+        other => format!("{other:?}"),
+    }
 }
