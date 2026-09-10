@@ -589,7 +589,6 @@ pub fn infer_expr(checked: &Checked, e: &S<Expr<Core>>) -> Result<(Type, Effects
 pub(crate) struct CheckedExpr {
     pub(crate) ty: Type,
     pub(crate) effects: Effects,
-    #[cfg(feature = "native")]
     pub(crate) facts: NodeFacts,
     pub(crate) holes: Vec<HoleReport>,
     dicts: DictTable,
@@ -600,7 +599,6 @@ pub(crate) struct CheckedExpr {
 /// # Errors
 /// Fails for ordinary type errors, and for typed holes unless `allow_holes` is
 /// true.
-#[cfg(feature = "native")]
 pub(crate) fn infer_checked_expr(
     checked: &Checked,
     e: &S<Expr<Core>>,
@@ -742,7 +740,6 @@ fn infer_expr_full(
     let g = tc.generalize(&env, &t);
     tc.holes.sort_by_key(|h| (h.start, h.end, h.name.clone()));
     let dicts = tc.dicts;
-    #[cfg(feature = "native")]
     let facts = NodeFacts::from_tables(
         tc.field_res,
         tc.unboxed_field,
@@ -758,7 +755,6 @@ fn infer_expr_full(
     Ok(CheckedExpr {
         ty: g,
         effects: effs,
-        #[cfg(feature = "native")]
         facts,
         holes: tc.holes,
         dicts,
