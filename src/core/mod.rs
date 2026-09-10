@@ -10,7 +10,6 @@ pub use prism_core::core::*;
 pub mod captures;
 pub mod elaborate;
 
-#[cfg(feature = "native")]
-pub(crate) use elaborate::elaborate_expr_defs;
 pub use elaborate::{builtin_arities, elaborate, konst_fns};
 pub use elaborate::{elaborate_typed, typed_verification_error};
+pub(crate) use elaborate::elaborate_expr_defs;

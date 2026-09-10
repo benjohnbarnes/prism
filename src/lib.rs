@@ -61,6 +61,7 @@ pub(crate) mod docs;
 pub mod driver;
 pub use prism_syntax::error;
 pub mod eval;
+pub mod eval_session;
 pub use prism_core::flags;
 // Internal: the intended surface is the crate-root re-exports (`format`,
 // `format_check`, `format_wire_accept`), not the module's helpers.
