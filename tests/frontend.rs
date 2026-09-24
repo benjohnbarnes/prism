@@ -121,6 +121,8 @@ mod fmt_using;
 mod contracts;
 #[path = "frontend/effect_op_collision.rs"]
 mod effect_op_collision;
+#[path = "frontend/effect_op_polymorphism.rs"]
+mod effect_op_polymorphism;
 #[path = "frontend/env_knobs.rs"]
 mod env_knobs;
 #[path = "frontend/error_codes.rs"]

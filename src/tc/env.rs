@@ -1467,8 +1467,15 @@ pub(super) fn build_data(prog: &Program<Core>) -> Result<BuildDataResult, TypeEr
                     grade: op.grade,
                 },
             );
-            // A var in the return type but in no parameter is instantiated fresh
-            // per perform site. Desugar restricts such ops to never arms.
+            // Every variable the operation's signature mentions is the
+            // operation's own, and the scheme has to bind it: a variable in a
+            // parameter is chosen by the caller at each perform site, and one in
+            // the return type but in no parameter is instantiated fresh there
+            // (desugar restricts such ops to never arms). A variable left free here
+            // joins the *environment's* free variables, which generalization
+            // anchors on, so an unrelated declaration that happens to spell a
+            // signature variable the same way is refused as an ambiguous
+            // constraint.
             let mut pv = BTreeSet::new();
             for p in &params {
                 collect_type_vars(p, &mut pv);
@@ -1476,11 +1483,12 @@ pub(super) fn build_data(prog: &Program<Core>) -> Result<BuildDataResult, TypeEr
             let mut rv = BTreeSet::new();
             collect_type_vars(&ret, &mut rv);
             let mut poly: Vec<Sym> = eff_decl.params.iter().map(Sym::from).collect();
-            let extra: Vec<Sym> = rv
-                .into_iter()
-                .filter(|v| !pv.contains(v) && !poly.contains(v))
-                .collect();
-            poly.extend(extra);
+            let mut bound: BTreeSet<Sym> = poly.iter().copied().collect();
+            for v in pv.iter().chain(rv.iter()).copied() {
+                if bound.insert(v) {
+                    poly.push(v);
+                }
+            }
             env.insert(
                 Sym::from(&op.name),
                 wrap_forall(&poly, Type::fun(params, ret)),
