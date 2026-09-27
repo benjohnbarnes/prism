@@ -2,3 +2,4 @@
 
 - [Joel Burget](https://github.com/joelburget)
 - [Michel Boucey](https://github.com/MichelBoucey)
+- [Ben Barnes](https://github.com/benjohnbarnes)
