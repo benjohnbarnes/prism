@@ -6,7 +6,9 @@
 //! generalized without it, and its own correct `given` constraint is refused as
 //! ambiguous.
 
-use prism::{check_on, report};
+use std::path::Path;
+
+use prism::{check_on, default_roots, report, report_on, with_prelude, Config};
 
 /// An ordinary class, a declaration that mentions its own type variable under a
 /// constraint, and an operation polymorphic in a variable it names in a parameter.
@@ -38,10 +40,35 @@ fn two() : Int = ask(\"x\")\n";
 /// A monomorphic operation, unaffected by any of this.
 const MONOMORPHIC: &str = "effect Ask\n  ask(Int) : Int\n\nfn one() : Int = ask(1)\n";
 
+/// One operation performed at a single type, handled by a clause that passes an
+/// *enclosing function's* type variable through the continuation.
+///
+/// A clause binds the operation's own variables, and an operation's variable means
+/// "whatever type the perform site chose" — here `String`, for `id(\"hello\")`, which is
+/// not the type of `run`'s `y`. Passing `y` where the operation's value belongs is
+/// therefore a mismatch, and it has to be found here: a checker that accepts it
+/// reifies the value at the wrong type, and the fault surfaces at runtime instead,
+/// inside `str_len`.
+///
+/// Unlike the cases above, this one needs the prelude (`str_len`, `println`), so it is
+/// checked with roots rather than with nothing resolved for it.
+const CAPTURING_HANDLER: &str = "effect Id\n  id(a) : a\n\n\
+fn go() : Int ! {Id} =\n  let s = id(\"hello\")\n  str_len(s) + 0\n\n\
+fn run(y : a) : Unit =\n  handle go() with\n    id(x) resume k => k(y)\n    return r => println(\"{r}\")\n\n\
+fn main() = run(42)\n";
+
 /// Checked with nothing resolved for it: `Int` is built in, and every name these
 /// programs use is declared in the program itself.
 fn check(src: &str) -> Result<(), String> {
     check_on(src, &[]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The same, for a program that uses the standard library: `default_roots` is what
+/// the prelude's own `import Data…` lines resolve against (see `prelude_capture.rs`).
+fn check_with_prelude(src: &str) -> Result<(), String> {
+    check_on(&with_prelude(src), &default_roots(Path::new(".")))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[test]
@@ -85,4 +112,31 @@ fn a_monomorphic_operation_is_unaffected() {
     if let Err(e) = check(MONOMORPHIC) {
         panic!("monomorphic op: {e}");
     }
+}
+
+/// A clause binds the operation's own variables, so passing an enclosing function's
+/// variable where the operation's value belongs is a mismatch. The check belongs to
+/// typechecking rather than to the runtime: what it prevents is a program that checks
+/// and then reifies the value at the wrong type, which is a soundness hole rather than
+/// a nuisance.
+#[test]
+fn a_clause_may_not_pass_an_enclosing_functions_variable_for_the_operations() {
+    let err = check_with_prelude(CAPTURING_HANDLER)
+        .expect_err("the clause passes `run`'s variable where the operation's belongs");
+    assert!(
+        err.contains("type mismatch"),
+        "a named mismatch, not an internal invariant: {err}"
+    );
+
+    // And the same through the pipeline, where it carries its E-code: a reader of a
+    // build log should be able to see what kind of fault it is.
+    let pipeline = report_on(
+        &with_prelude(CAPTURING_HANDLER),
+        &default_roots(Path::new(".")),
+        &Config::default(),
+    );
+    assert!(
+        pipeline.contains("E1022") && pipeline.contains("type mismatch"),
+        "the pipeline reports it as a type error too:\n{pipeline}"
+    );
 }

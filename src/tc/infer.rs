@@ -1157,6 +1157,25 @@ impl Tc<'_> {
                                 Some((_, args)) => info.instantiate(args),
                                 None => (info.params.clone(), info.ret.clone()),
                             };
+                        // The operation's own signature variables are the
+                        // *operation's*, not this clause's. Copied raw, the op's `a`
+                        // is the same variable an enclosing function may happen to
+                        // name `a`, so a clause can pass its own `y : a` where the
+                        // operation's `a` is expected: it typechecks, and the value
+                        // is then reified at the wrong type. Fresh rigid identities
+                        // per clause make the clause treat them generically, which is
+                        // what the fresh *existentials* below do for the op's row
+                        // variables.
+                        let mut skolems = Vec::new();
+                        for v in Self::op_signature_vars(&op_params, &op_ret) {
+                            let sk = Sym::fresh_named(v);
+                            for q in &mut op_params {
+                                *q = q.subst_var(v, &Type::Var(sk));
+                            }
+                            op_ret = op_ret.subst_var(v, &Type::Var(sk));
+                            self.ctx.push(Entry::Uni(sk));
+                            skolems.push(sk);
+                        }
                         // Open the op's free row variables per handler clause, so a
                         // row-polymorphic argument (`fork`'s fiber thunk) does not
                         // pin the handler's answer row to a rigid variable.
@@ -1183,6 +1202,9 @@ impl Tc<'_> {
                         self.precise_calls.insert(k_row, body_residual.clone());
                         let checked = self.check(&env2, arm_body, &Type::Exist(ret_ex));
                         self.precise_calls.remove(&k_row);
+                        for sk in skolems {
+                            self.drop_uni(sk);
+                        }
                         checked?;
                     } else {
                         return Err(ErrKind::UnknownEffectOp {
@@ -1611,6 +1633,19 @@ impl Tc<'_> {
     // stored signature; a handler clause opens it fresh so it unifies downstream
     // with the reified answer row instead of leaking a rigid variable. Ops with
     // no free row variable are untouched.
+    // The type-variable analogue of the row set `open_op_rows` collects: every type
+    // variable the operation's own signature mentions, in a stable order. The
+    // effect declaration's parameters have been substituted out by then, so what is
+    // left is the operation's own.
+    fn op_signature_vars(params: &[Type], ret: &Type) -> BTreeSet<Sym> {
+        let mut vars = BTreeSet::new();
+        for p in params {
+            super::env::collect_type_vars(p, &mut vars);
+        }
+        super::env::collect_type_vars(ret, &mut vars);
+        vars
+    }
+
     fn open_op_rows(&mut self, params: &mut [Type], ret: &mut Type) {
         let mut rows = BTreeSet::new();
         for p in params.iter() {
