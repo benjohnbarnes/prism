@@ -16,9 +16,9 @@ use crate::names;
 use crate::sym::Sym;
 use crate::syntax::ast::{self, Core, Expr, Grade, HandlerArm, HandlerMode, NodeId, S};
 use crate::syntax::desugar::referenced_names;
-use crate::types::ty::{EffRow, Label, Type, LIST, NUM_CLASS, SHOW_CLASS};
+use crate::types::ty::{EffRow, Kind, Label, Type, LIST, NUM_CLASS, SHOW_CLASS};
 use crate::types::EffOpInfo;
-use crate::wired::Indexable;
+use crate::wired::{self, Indexable};
 
 // Red zone / segment size for the checker's per-node recursion, matching the
 // desugar and typed-Core-builder guards.
@@ -273,6 +273,30 @@ impl Tc<'_> {
         handled
     }
 
+    /// The constructor a list literal builds when the expected type is the standard
+    /// library's vector, as `(element position, dimension position, constructor)`, or
+    /// `None` for any other type: naming `Data.Vec.Vec` here is a stepping stone.
+    fn shape_indexed_ctor(&self, ty: &Type) -> Option<(usize, usize, Sym)> {
+        let Type::Con(head, args) = ty else {
+            return None;
+        };
+        if head.as_str() != wired::TY_VEC || args.len() != 2 {
+            return None;
+        }
+        // The declaration is known, so this is a sanity check rather than a way of
+        // recognising `Vec`: one constructor, and the positions read from the kinds
+        // rather than assumed, so a re-declaration retires the form rather than
+        // misreading it.
+        let info = self.data.get(head.as_str())?;
+        if info.ctors.len() != 1 {
+            return None;
+        }
+        let kinds = info.param_kinds();
+        let elem_i = kinds.iter().position(|k| *k == Kind::Type)?;
+        let nat_i = kinds.iter().position(|k| *k == Kind::Nat)?;
+        Some((elem_i, nat_i, Sym::from(info.ctors[0].as_str())))
+    }
+
     fn check(&mut self, env: &Env, e: &S<Expr<Core>>, ty: &Type) -> Result<(), TypeError> {
         self.with_tooltip_row(e.id, e.span, |tc| tc.check_node(env, e, ty))
     }
@@ -313,6 +337,34 @@ impl Tc<'_> {
     ) -> Result<(), TypeError> {
         let span = e.span;
         let id = e.id;
+        // A list literal against `Vec` takes its length from the literal's own element
+        // count, so `[1, 2, 3]` fills a `Vec(Int, 3)` position with no construction
+        // function in sight. Decided here rather than in an arm below, because the
+        // expected type is what decides it and a guard cannot bind what an arm needs.
+        if let (Expr::List(elems), Type::Con(_, args), Some((elem_i, nat_i, ctor))) =
+            (&e.node, ty, self.shape_indexed_ctor(ty))
+        {
+            let elem_ty = self.apply(&args[elem_i]);
+            for elem in elems {
+                self.check(env, elem, &elem_ty)?;
+            }
+            // The dimension is unified rather than merely compared, so a literal against
+            // a variable length solves it, a clash names both lengths, and a rigid length
+            // is refused rather than forced.
+            let want = self.apply(&args[nat_i]);
+            let got = Type::Nat(u64::try_from(elems.len()).unwrap_or(u64::MAX));
+            self.subtype(&got, &want).map_err(|e| {
+                e.or(TypeError::TypeMismatch {
+                    span,
+                    expected: want.show(),
+                    found: got.show(),
+                })
+            })?;
+            // Elaboration cannot see the expected type, so the constructor it wraps the
+            // element chain in is recorded against this node.
+            self.shape_indexed.insert(id, ctor);
+            return Ok(());
+        }
         match (&e.node, ty) {
             (Expr::Hole(name), _) => {
                 self.record_hole(env, name, span, ty.clone());

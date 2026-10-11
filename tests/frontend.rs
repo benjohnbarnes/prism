@@ -81,6 +81,8 @@ mod query;
 mod reflect;
 #[path = "language/rigid_sig_vars.rs"]
 mod rigid_sig_vars;
+#[path = "language/shape_indexed_literal.rs"]
+mod shape_indexed_literal;
 #[path = "language/skolem_escape.rs"]
 mod skolem_escape;
 #[path = "language/soundness.rs"]

@@ -11,6 +11,11 @@
 --   - `vzip` requires equal lengths (both `n`); a length clash is a compile
 --     error that names both lengths.
 --
+-- A list **literal** may be passed where a `Vec` is expected: `use_vec([1, 2, 3])`,
+-- with the literal's length fixing the `Vec`'s size. However, a list value can't
+-- be passed here as it has dynamic length: binding `let l = [1, 2, 3]` and then
+-- calling `use_vec(l)` is a type error.
+--
 -- Two operations are deliberately absent because their result length is not
 -- expressible under equality-only unification: a length-changing
 -- `vcons : (a, Vec(a, n)) -> Vec(a, n + 1)` and an append

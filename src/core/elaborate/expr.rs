@@ -926,7 +926,35 @@ impl Elab<'_> {
                         Box::new(Comp::Bind(Box::new(acc), vrest.into(), Box::new(cons))),
                     );
                 }
-                acc
+                // A literal checked against a shape-indexed type is that type's own
+                // constructor applied to the element chain above. Checking recorded
+                // which one, since the expected type is not visible here.
+                match self.hir.res(e.id) {
+                    Some(NodeRes::ShapeIndexed(ctor)) => {
+                        let ctor = *ctor;
+                        let vlist = self.fresh();
+                        let tag = self
+                            .ctors
+                            .get(ctor.as_str())
+                            .ok_or_else(|| {
+                                Error::InternalInvariant(format!(
+                                    "no tag for constructor `{}`",
+                                    ctor.as_str()
+                                ))
+                            })?
+                            .tag;
+                        Comp::Bind(
+                            Box::new(acc),
+                            vlist.clone().into(),
+                            Box::new(Comp::Return(Value::Ctor(
+                                ctor,
+                                tag,
+                                vec![Value::Var(vlist.into())],
+                            ))),
+                        )
+                    }
+                    _ => acc,
+                }
             }
             Expr::FieldAccess(recv, field) => self.field_access(e.id, recv, field, locals)?,
             Expr::RecordCreate(ctor_name, field_exprs) => {
