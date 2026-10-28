@@ -760,6 +760,23 @@ fn parse_warn_mode(flag: &str, s: &str) -> Option<prism::WarnDupes> {
 }
 
 fn main() -> ExitCode {
+    // Deeply nested higher-rank types (for example the CPS encoding of an
+    // existential ForEach package) can exhaust the default 8 MiB main-thread
+    // stack during checking and lowering. The recursive, source-bounded compiler
+    // paths therefore get a larger working stack here. This is a headroom
+    // measure, not a semantic change; replacing those traversals with explicit
+    // heap worklists is the longer-term fix.
+    const MAIN_STACK: usize = 64 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("prism-main".to_owned())
+        .stack_size(MAIN_STACK)
+        .spawn(prism_main)
+        .expect("spawn prism main thread")
+        .join()
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn prism_main() -> ExitCode {
     let cli = Cli::parse();
     if cli.opt.is_some() && cli.passes.is_some() {
         eprintln!("error: `--passes` and `-O` are mutually exclusive");
